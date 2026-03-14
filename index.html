@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+  <title>Jarmful Agent</title>
+  <style>
+    body { font-family: Arial; max-width: 600px; margin: 50px auto; }
+    input { width: 100%; padding: 10px; font-size: 16px; }
+    button { padding: 10px 20px; background: #007AFF; color: white; border: none; cursor: pointer; }
+    #output { margin-top: 20px; padding: 10px; background: #f0f0f0; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <h1>🤖 Jarmful Agent</h1>
+  <input type="text" id="input" placeholder="Ask me something...">
+  <button onclick="send()">Send</button>
+  <button onclick="showMemories()">Show Memories</button>
+  <div id="output"></div>
+  <div id="memories"></div>
+
+<script>
+  function send() {
+    const text = document.getElementById('input').value;
+    
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    })
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById('output').innerHTML = data.response;
+      document.getElementById('input').value = '';
+    });
+  }
+
+  function showMemories() {
+    fetch('/api/memories')
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById('memories').innerHTML = '<h3>All Memories:</h3>' + data.map(m => `<p>• ${m.message}</p>`).join('');
+    });
+  }
+</script>
+</body>
+</html>
