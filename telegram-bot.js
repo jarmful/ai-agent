@@ -286,6 +286,7 @@ bot.command('ask', async (ctx) => {
 // Image handler
 bot.on('photo', async (ctx) => {
   const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
 
   if (!ALLOWED_USERS.includes(userId)) {
     ctx.reply('❌ Permission denied.');
@@ -295,11 +296,20 @@ bot.on('photo', async (ctx) => {
   try {
     await ctx.sendChatAction('typing');
 
-    // Get highest quality photo
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     const caption = ctx.message.caption || 'What do you see in this image? Give me your direct take.';
 
-    // Get file URL from Telegram
+    // Check if this photo is a reply to another message
+    let replyContext = '';
+    if (ctx.message.reply_to_message) {
+      const replied = ctx.message.reply_to_message;
+      if (replied.text) {
+        replyContext = `\n\n[Jarmo is replying to this message: "${replied.text}"]`;
+      } else if (replied.caption) {
+        replyContext = `\n\n[Jarmo is replying to a message with caption: "${replied.caption}"]`;
+      }
+    }
+
     const fileLink = await ctx.telegram.getFileLink(photo.file_id);
     const imageBase64 = await downloadImageAsBase64(fileLink.href);
 
@@ -320,7 +330,7 @@ bot.on('photo', async (ctx) => {
             },
             {
               type: 'text',
-              text: caption,
+              text: caption + replyContext,
             },
           ],
         },
@@ -330,10 +340,8 @@ bot.on('photo', async (ctx) => {
 
     const reply = response.choices[0].message.content;
 
-    // Save to conversation memory
-    const chatId = ctx.chat.id;
     if (!conversations[chatId]) conversations[chatId] = [];
-    conversations[chatId].push({ role: 'user', content: `[Sent an image] ${caption}` });
+    conversations[chatId].push({ role: 'user', content: `[Sent an image] ${caption}${replyContext}` });
     conversations[chatId].push({ role: 'assistant', content: reply });
 
     ctx.reply(reply);
@@ -348,11 +356,23 @@ bot.on('photo', async (ctx) => {
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
-  const text = ctx.message.text;
+  let text = ctx.message.text;
 
   if (!ALLOWED_USERS.includes(userId)) {
     ctx.reply('❌ Permission denied.');
     return;
+  }
+
+  // Check if this is a reply to a previous message
+  if (ctx.message.reply_to_message) {
+    const replied = ctx.message.reply_to_message;
+    if (replied.text) {
+      text = `[Replying to: "${replied.text}"]\n\n${text}`;
+    } else if (replied.caption) {
+      text = `[Replying to message with caption: "${replied.caption}"]\n\n${text}`;
+    } else if (replied.photo) {
+      text = `[Replying to an image]\n\n${text}`;
+    }
   }
 
   try {
