@@ -188,3 +188,6 @@ bot.on('message', async (msg) => {
 });
 
 console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
+bot.on('polling_error', (error) => {
+  console.error('Polling error details:', error.code, error.message, error.stack);
+});
