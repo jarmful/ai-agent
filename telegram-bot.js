@@ -1,12 +1,11 @@
 require('dotenv').config();
-const TelegramBot = require('node-telegram-bot-api');
+const { Bot } = require('grammy');
 const OpenAI = require('openai');
 const tavily = require('tavily');
 const fs = require('fs');
 const path = require('path');
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
-const bot = new TelegramBot(TOKEN, { polling: true });
+const bot = new Bot(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const tavilyClient = new tavily.TavilyClient({ apiKey: process.env.TAVILY_API_KEY });
 
@@ -102,7 +101,6 @@ Example output: ["Dubai positive news March 2026", "UAE crypto news 2026", "UAE 
       ],
       max_tokens: 100,
     });
-
     const content = response.choices[0].message.content.trim();
     const parsed = JSON.parse(content);
     return Array.isArray(parsed) ? parsed : [text.slice(0, 100)];
@@ -145,66 +143,69 @@ function saveMemories(memories) {
 
 let conversations = loadMemories();
 
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const text = msg.text;
-
-  if (!ALLOWED_USERS.includes(userId)) {
-    bot.sendMessage(chatId, '❌ Permission denied.');
-    return;
-  }
-
-  if (text === '/start') {
-    bot.sendMessage(chatId, '🤖 Agent Bebe here. What do you need?\n\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all');
-    if (!conversations[chatId]) {
-      conversations[chatId] = [];
-      saveMemories(conversations);
-    }
-    return;
-  }
-
-  if (text === '/recall') {
-    const memory = conversations[chatId] || [];
-    const userCount = memory.filter(m => m.role === 'user').length;
-    bot.sendMessage(chatId, `📊 Total messages: ${memory.length}\n👤 Your messages: ${userCount}`);
-    return;
-  }
-
-  if (text === '/clear') {
+bot.command('start', (ctx) => {
+  const chatId = ctx.chat.id;
+  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all');
+  if (!conversations[chatId]) {
     conversations[chatId] = [];
     saveMemories(conversations);
-    bot.sendMessage(chatId, '🗑️ Cleared!');
+  }
+});
+
+bot.command('recall', (ctx) => {
+  const chatId = ctx.chat.id;
+  const memory = conversations[chatId] || [];
+  const userCount = memory.filter(m => m.role === 'user').length;
+  ctx.reply(`📊 Total messages: ${memory.length}\n👤 Your messages: ${userCount}`);
+});
+
+bot.command('clear', (ctx) => {
+  const chatId = ctx.chat.id;
+  conversations[chatId] = [];
+  saveMemories(conversations);
+  ctx.reply('🗑️ Cleared!');
+});
+
+bot.command('ask', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const question = ctx.match;
+  if (!question) {
+    ctx.reply('Usage: /ask <your question>');
+    return;
+  }
+  const allMemories = conversations[chatId] || [];
+  if (allMemories.length === 0) {
+    ctx.reply('📝 No memories yet!');
+    return;
+  }
+  try {
+    await ctx.replyWithChatAction('typing');
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...allMemories,
+        { role: 'user', content: question }
+      ],
+      max_tokens: 300,
+    });
+    ctx.reply('🔍 ' + response.choices[0].message.content);
+  } catch (error) {
+    console.error('Error in /ask:', error);
+    ctx.reply('❌ Error!');
+  }
+});
+
+bot.on('message:text', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  const text = ctx.message.text;
+
+  if (!ALLOWED_USERS.includes(userId)) {
+    ctx.reply('❌ Permission denied.');
     return;
   }
 
-  if (text.startsWith('/ask ')) {
-    const question = text.replace('/ask ', '').trim();
-    const allMemories = conversations[chatId] || [];
-    if (allMemories.length === 0) {
-      bot.sendMessage(chatId, '📝 No memories yet!');
-      return;
-    }
-    try {
-      bot.sendChatAction(chatId, 'typing');
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...allMemories,
-          { role: 'user', content: question }
-        ],
-        max_tokens: 300,
-      });
-      bot.sendMessage(chatId, '🔍 ' + response.choices[0].message.content);
-    } catch (error) {
-      console.error('Error in /ask:', error);
-      bot.sendMessage(chatId, '❌ Error!');
-    }
-    return;
-  }
-
-  // Normal chat
   try {
     if (!conversations[chatId]) conversations[chatId] = [];
 
@@ -216,22 +217,19 @@ bot.on('message', async (msg) => {
       console.log('💾 Saved to disk');
     }
 
-    bot.sendChatAction(chatId, 'typing');
+    await ctx.replyWithChatAction('typing');
     const startTime = Date.now();
     const recentMessages = conversations[chatId].slice(-8);
 
     let messages;
 
     if (needsSearch(text)) {
-      // Generate multiple targeted search queries
       const queries = await generateSearchQueries(text);
       console.log('🔍 Search queries:', queries);
 
-      // Run all searches in parallel
       const searchPromises = queries.map(q => searchWeb(q));
       const searchResultsArr = await Promise.all(searchPromises);
 
-      // Combine all results
       const combinedResults = queries
         .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q}" ===\n${searchResultsArr[i]}` : null)
         .filter(Boolean)
@@ -269,17 +267,14 @@ bot.on('message', async (msg) => {
     conversations[chatId].push({ role: 'assistant', content: reply });
 
     const duration = Date.now() - startTime;
-    bot.sendMessage(chatId, reply);
+    ctx.reply(reply);
     console.log(`✅ ${duration}ms | 🧠 ${conversations[chatId].length} messages stored`);
 
   } catch (error) {
     console.error('Error:', error);
-    bot.sendMessage(chatId, '❌ Error!');
+    ctx.reply('❌ Error!');
   }
 });
 
+bot.start();
 console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
-bot.on('polling_error', (error) => {
-  console.error('Polling error details:', error.code, error.message, error.stack);
-});
-
