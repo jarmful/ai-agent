@@ -4,6 +4,7 @@ const OpenAI = require('openai');
 const tavily = require('tavily');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -90,6 +91,20 @@ Rules:
 - Skip anything about regional conflict or geopolitical tensions
 - End with: "🎯 Top opportunity today: [one actionable insight for Jarmo]"`;
 
+async function downloadImageAsBase64(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        resolve(buffer.toString('base64'));
+      });
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
 async function searchWeb(query) {
   try {
     const shortQuery = query.slice(0, 200);
@@ -168,7 +183,7 @@ let conversations = loadMemories();
 
 bot.command('start', (ctx) => {
   const chatId = ctx.chat.id;
-  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/dubai - Daily Dubai briefing\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all');
+  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/dubai - Daily Dubai briefing\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all\n\n📸 Send me an image and I\'ll analyze it.');
   if (!conversations[chatId]) {
     conversations[chatId] = [];
     saveMemories(conversations);
@@ -190,7 +205,6 @@ bot.command('dubai', async (ctx) => {
   try {
     const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-    // Run 3 targeted Dubai searches in parallel
     const [r1, r2, r3] = await Promise.all([
       searchWeb(`Dubai business investment real estate news ${today}`),
       searchWeb('Dubai infrastructure tourism tech innovation 2026'),
@@ -216,8 +230,7 @@ bot.command('dubai', async (ctx) => {
       max_tokens: 1500,
     });
 
-    const briefing = response.choices[0].message.content;
-    ctx.reply(briefing);
+    ctx.reply(response.choices[0].message.content);
     console.log(`📍 Dubai briefing delivered`);
 
   } catch (error) {
@@ -267,6 +280,68 @@ bot.command('ask', async (ctx) => {
   } catch (error) {
     console.error('Error in /ask:', error);
     ctx.reply('❌ Error!');
+  }
+});
+
+// Image handler
+bot.on('photo', async (ctx) => {
+  const userId = ctx.from.id;
+
+  if (!ALLOWED_USERS.includes(userId)) {
+    ctx.reply('❌ Permission denied.');
+    return;
+  }
+
+  try {
+    await ctx.sendChatAction('typing');
+
+    // Get highest quality photo
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const caption = ctx.message.caption || 'What do you see in this image? Give me your direct take.';
+
+    // Get file URL from Telegram
+    const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+    const imageBase64 = await downloadImageAsBase64(fileLink.href);
+
+    console.log('📸 Processing image...');
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${imageBase64}`,
+              },
+            },
+            {
+              type: 'text',
+              text: caption,
+            },
+          ],
+        },
+      ],
+      max_tokens: 1000,
+    });
+
+    const reply = response.choices[0].message.content;
+
+    // Save to conversation memory
+    const chatId = ctx.chat.id;
+    if (!conversations[chatId]) conversations[chatId] = [];
+    conversations[chatId].push({ role: 'user', content: `[Sent an image] ${caption}` });
+    conversations[chatId].push({ role: 'assistant', content: reply });
+
+    ctx.reply(reply);
+    console.log('📸 Image analyzed');
+
+  } catch (error) {
+    console.error('Image error:', error);
+    ctx.reply('❌ Could not process image.');
   }
 });
 
