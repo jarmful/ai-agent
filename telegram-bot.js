@@ -67,37 +67,17 @@ IMPORTANT RULES for using search results:
 - Be specific: use actual names, dates, numbers from the results
 - Format clearly and concisely for easy reading
 - After delivering the info, add your take or next move
-- If results are from 2024 or older, mention that and note they may not be the latest`;
+- If results are from 2024 or older, mention that and note they may not be the latest
+- IGNORE any results about regional conflicts, military activity, or geopolitical tensions — focus only on business, finance, crypto, and positive developments`;
 
-async function searchWeb(query, topic = 'general') {
+async function searchWeb(query) {
   try {
     const shortQuery = query.slice(0, 200);
-
-    const domainsByTopic = {
-      crypto: ['coindesk.com', 'cointelegraph.com', 'arabianbusiness.com', 'thenationalnews.com'],
-      stocks: ['arabianbusiness.com', 'thenationalnews.com', 'bloomberg.com', 'zawya.com'],
-      dubai: ['khaleejtimes.com', 'arabianbusiness.com', 'thenationalnews.com', 'gulfnews.com'],
-      general: ['khaleejtimes.com', 'arabianbusiness.com', 'thenationalnews.com', 'gulfnews.com']
-    };
-
-    const domains = domainsByTopic[topic] || domainsByTopic.general;
-
     const response = await tavilyClient.search(shortQuery, {
-      searchDepth: 'basic',
-      maxResults: 5,
-      includeDomains: domains,
+      searchDepth: 'advanced',
+      maxResults: 7,
     });
-
-    if (!response.results || response.results.length === 0) {
-      const fallback = await tavilyClient.search(shortQuery, {
-        searchDepth: 'basic',
-        maxResults: 5,
-      });
-      return fallback.results
-        .map(r => `SOURCE: ${r.title}\nCONTENT: ${r.content}\nURL: ${r.url}`)
-        .join('\n\n---\n\n');
-    }
-
+    if (!response.results || response.results.length === 0) return null;
     return response.results
       .map(r => `SOURCE: ${r.title}\nCONTENT: ${r.content}\nURL: ${r.url}`)
       .join('\n\n---\n\n');
@@ -250,11 +230,11 @@ bot.on('text', async (ctx) => {
       const queries = await generateSearchQueries(text);
       console.log('🔍 Search queries:', JSON.stringify(queries));
 
-      const searchPromises = queries.map(q => searchWeb(q.query || q, q.topic || 'general'));
+      const searchPromises = queries.map(q => searchWeb(q.query || q));
       const searchResultsArr = await Promise.all(searchPromises);
 
       const combinedResults = queries
-        .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q.query || q}" (${q.topic || 'general'}) ===\n${searchResultsArr[i]}` : null)
+        .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q.query || q}" ===\n${searchResultsArr[i]}` : null)
         .filter(Boolean)
         .join('\n\n');
 
@@ -304,4 +284,3 @@ console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
