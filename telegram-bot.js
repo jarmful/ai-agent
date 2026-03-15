@@ -1,6 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
+const { tavily } = require('@tavily/core');
 const fs = require('fs');
 const path = require('path');
 
@@ -9,24 +10,22 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+const tavilyClient = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
 const ALLOWED_USERS = [266284115];
 
-// ✅ Railway uses /app/data for persistent storage, locally uses root folder
 const MEMORY_DIR = process.env.RAILWAY_ENVIRONMENT
   ? '/app/data'
   : __dirname;
 const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.json');
 
-// Make sure memory directory exists
 if (!fs.existsSync(MEMORY_DIR)) {
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
 }
 
 let saveCounter = 0;
 
-// ✅ Agent Bebe - Mentor Mode
-const SYSTEM_PROMPT = `You are Agent Bebe - a sharp, direct mentor and idea evaluator.
+const SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct thinking partner.
 
 IDENTITY:
 - Your name is Agent Bebe, always. Never call yourself "an AI assistant"
@@ -56,6 +55,13 @@ WHEN GIVEN FEEDBACK:
 4. Offer 2-3 clear options with tradeoffs
 5. End with: "Which direction?" or "Ready to move forward?"
 
+WEB SEARCH:
+- You have access to real-time web search
+- Use it automatically when Jarmo asks about news, current events, prices, people, or anything that needs up-to-date info
+- Lead with the actual answer from search results, not suggestions on where to look
+- Cite what you found and when it's from
+- Be direct: give the information, then your take on it
+
 RULES:
 - Never leave Jarmo stuck — always point forward
 - No flattery, no filler, no corporate-speak
@@ -63,6 +69,32 @@ RULES:
 - Challenge lazy thinking
 - Short and punchy unless explaining something complex
 - Move toward action, not suggestions`;
+
+// Search function
+async function searchWeb(query) {
+  try {
+    const response = await tavilyClient.search(query, {
+      searchDepth: 'basic',
+      maxResults: 5,
+    });
+    return response.results.map(r => `${r.title}: ${r.content} (${r.url})`).join('\n\n');
+  } catch (error) {
+    console.error('Search error:', error);
+    return null;
+  }
+}
+
+// Detect if message needs web search
+function needsSearch(text) {
+  const searchTriggers = [
+    'news', 'today', 'latest', 'current', 'now', 'price', 'weather',
+    'who is', 'what is', 'when did', 'how much', 'update', 'recent',
+    'happening', 'right now', 'this week', 'this month', 'score',
+    'stock', 'crypto', 'market', 'died', 'launched', 'released'
+  ];
+  const lower = text.toLowerCase();
+  return searchTriggers.some(trigger => lower.includes(trigger));
+}
 
 function loadMemories() {
   try {
@@ -133,7 +165,6 @@ bot.on('message', async (msg) => {
 
     try {
       bot.sendChatAction(chatId, 'typing');
-
       const response = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
@@ -143,7 +174,6 @@ bot.on('message', async (msg) => {
         ],
         max_tokens: 300,
       });
-
       bot.sendMessage(chatId, '🔍 ' + response.choices[0].message.content);
     } catch (error) {
       console.error('Error in /ask:', error);
@@ -152,7 +182,7 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Normal chat — fast, uses last 8 messages
+  // Normal chat
   try {
     if (!conversations[chatId]) {
       conversations[chatId] = [];
@@ -160,7 +190,6 @@ bot.on('message', async (msg) => {
 
     conversations[chatId].push({ role: 'user', content: text });
 
-    // ⚡ Save every 5 messages
     saveCounter++;
     if (saveCounter % 5 === 0) {
       saveMemories(conversations);
@@ -170,16 +199,25 @@ bot.on('message', async (msg) => {
     bot.sendChatAction(chatId, 'typing');
     const startTime = Date.now();
 
-    // Only send last 8 to API (fast ⚡)
     const recentMessages = conversations[chatId].slice(-8);
+
+    // Add web search context if needed
+    let systemPrompt = SYSTEM_PROMPT;
+    if (needsSearch(text)) {
+      console.log('🔍 Searching web for:', text);
+      const searchResults = await searchWeb(text);
+      if (searchResults) {
+        systemPrompt += `\n\nCURRENT WEB SEARCH RESULTS FOR "${text}":\n${searchResults}\n\nUse these results to give Jarmo a direct, informed answer.`;
+      }
+    }
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         ...recentMessages
       ],
-      max_tokens: 200,
+      max_tokens: 500,
     });
 
     const reply = response.choices[0].message.content;
