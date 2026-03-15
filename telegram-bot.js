@@ -205,7 +205,8 @@ bot.on('message', async (msg) => {
     let systemPrompt = SYSTEM_PROMPT;
     if (needsSearch(text)) {
       console.log('🔍 Searching web for:', text);
-      const searchResults = await searchWeb(text);
+      const searchQuery = text.slice(0, 200);
+const searchResults = await searchWeb(searchQuery);
       if (searchResults) {
         systemPrompt += `\n\nCURRENT WEB SEARCH RESULTS FOR "${text}":\n${searchResults}\n\nUse these results to give Jarmo a direct, informed answer.`;
       }
