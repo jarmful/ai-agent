@@ -205,13 +205,14 @@ bot.command('dubai', async (ctx) => {
   try {
     const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-    const [r1, r2, r3] = await Promise.all([
-      searchWeb(`Dubai business investment real estate news ${today}`),
-      searchWeb('Dubai infrastructure tourism tech innovation 2026'),
-      searchWeb('Dubai economic growth milestones March 2026'),
-    ]);
+const [r1, r2, r3, r4] = await Promise.all([
+  searchWeb(`Dubai business investment real estate news ${today}`),
+  searchWeb(`Dubai infrastructure tourism tech innovation ${today}`),
+  searchWeb(`Dubai economic growth milestones ${today}`),
+  searchWeb(`Dubai UAE resilience stability amid regional conflict ${today}`),
+]);
 
-    const combinedResults = [r1, r2, r3].filter(Boolean).join('\n\n===\n\n');
+const combinedResults = [r1, r2, r3, r4].filter(Boolean).join('\n\n===\n\n');
 
     if (!combinedResults) {
       ctx.reply('❌ Could not fetch Dubai news right now. Try again in a minute.');
