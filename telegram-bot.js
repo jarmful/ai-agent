@@ -59,15 +59,16 @@ RULES:
 - Short and punchy unless explaining something complex
 - Move toward action, not suggestions`;
 
-const SEARCH_PROMPT = `You have been given real web search results below. 
+const SEARCH_PROMPT = `You have been given real web search results below.
 IMPORTANT RULES for using search results:
 - Extract and present ACTUAL facts, numbers, names and events from the results
 - Do NOT suggest where to look or what to search — the search is already done
-- Do NOT say "based on available data" or "you can find this at..." 
+- Do NOT say "based on available data" or "you can find this at..."
 - Present the real information directly as if you found it yourself
 - Be specific: use actual names, dates, numbers from the results
 - Format clearly and concisely for easy reading
-- After delivering the info, add your take or next move`;
+- After delivering the info, add your take or next move
+- If results are from 2024 or older, mention that and note they may not be the latest`;
 
 async function searchWeb(query) {
   try {
@@ -85,12 +86,39 @@ async function searchWeb(query) {
   }
 }
 
+async function generateSearchQueries(text) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'user',
+          content: `Analyze this request and return a JSON array of 1-3 specific search queries needed to answer it fully. Each query should be 5-10 words max. Return ONLY a JSON array, nothing else.
+
+Request: "${text.slice(0, 300)}"
+
+Example output: ["Dubai positive news March 2026", "UAE crypto news 2026", "UAE stock market KPI 2026"]`
+        }
+      ],
+      max_tokens: 100,
+    });
+
+    const content = response.choices[0].message.content.trim();
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [text.slice(0, 100)];
+  } catch (error) {
+    console.error('Query generation error:', error);
+    return [text.slice(0, 100)];
+  }
+}
+
 function needsSearch(text) {
   const searchTriggers = [
     'news', 'today', 'latest', 'current', 'now', 'price', 'weather',
     'who is', 'what is', 'when did', 'how much', 'update', 'recent',
     'happening', 'right now', 'this week', 'this month', 'score',
-    'stock', 'crypto', 'market', 'died', 'launched', 'released', 'dubai'
+    'stock', 'crypto', 'market', 'died', 'launched', 'released', 'dubai',
+    'uae', 'tell me about', 'what happened', 'kpi', 'analysis'
   ];
   const lower = text.toLowerCase();
   return searchTriggers.some(trigger => lower.includes(trigger));
@@ -195,26 +223,27 @@ bot.on('message', async (msg) => {
     let messages;
 
     if (needsSearch(text)) {
-      // Generate a clean search query using GPT
-  const queryResponse = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'user', content: `Convert this into a short 5-10 word search query for Google. Return ONLY the query, nothing else: "${text}"` }
-    ],
-    max_tokens: 30,
-  });
-  const searchQuery = queryResponse.choices[0].message.content.trim();
-  console.log('🔍 Searching web for:', searchQuery);
-  const searchResults = await searchWeb(searchQuery);
+      // Generate multiple targeted search queries
+      const queries = await generateSearchQueries(text);
+      console.log('🔍 Search queries:', queries);
 
-      if (searchResults) {
-        // Inject search results as a system message + separate user context
+      // Run all searches in parallel
+      const searchPromises = queries.map(q => searchWeb(q));
+      const searchResultsArr = await Promise.all(searchPromises);
+
+      // Combine all results
+      const combinedResults = queries
+        .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q}" ===\n${searchResultsArr[i]}` : null)
+        .filter(Boolean)
+        .join('\n\n');
+
+      if (combinedResults) {
         messages = [
           { role: 'system', content: SYSTEM_PROMPT + '\n\n' + SEARCH_PROMPT },
-          ...recentMessages.slice(0, -1), // all but last user message
+          ...recentMessages.slice(0, -1),
           {
             role: 'user',
-            content: `My question: ${text}\n\nHere are the actual search results you must use to answer:\n\n${searchResults}`
+            content: `My request: ${text}\n\nHere are the actual search results you must use to answer:\n\n${combinedResults}`
           }
         ];
       } else {
@@ -233,7 +262,7 @@ bot.on('message', async (msg) => {
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages,
-      max_tokens: 800,
+      max_tokens: 1000,
     });
 
     const reply = response.choices[0].message.content;
@@ -253,3 +282,4 @@ console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
 bot.on('polling_error', (error) => {
   console.error('Polling error details:', error.code, error.message, error.stack);
 });
+
