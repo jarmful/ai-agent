@@ -69,13 +69,35 @@ IMPORTANT RULES for using search results:
 - After delivering the info, add your take or next move
 - If results are from 2024 or older, mention that and note they may not be the latest`;
 
-async function searchWeb(query) {
+async function searchWeb(query, topic = 'general') {
   try {
     const shortQuery = query.slice(0, 200);
+
+    const domainsByTopic = {
+      crypto: ['coindesk.com', 'cointelegraph.com', 'arabianbusiness.com', 'thenationalnews.com'],
+      stocks: ['arabianbusiness.com', 'thenationalnews.com', 'bloomberg.com', 'zawya.com'],
+      dubai: ['khaleejtimes.com', 'arabianbusiness.com', 'thenationalnews.com', 'gulfnews.com'],
+      general: ['khaleejtimes.com', 'arabianbusiness.com', 'thenationalnews.com', 'gulfnews.com']
+    };
+
+    const domains = domainsByTopic[topic] || domainsByTopic.general;
+
     const response = await tavilyClient.search(shortQuery, {
       searchDepth: 'basic',
       maxResults: 5,
+      includeDomains: domains,
     });
+
+    if (!response.results || response.results.length === 0) {
+      const fallback = await tavilyClient.search(shortQuery, {
+        searchDepth: 'basic',
+        maxResults: 5,
+      });
+      return fallback.results
+        .map(r => `SOURCE: ${r.title}\nCONTENT: ${r.content}\nURL: ${r.url}`)
+        .join('\n\n---\n\n');
+    }
+
     return response.results
       .map(r => `SOURCE: ${r.title}\nCONTENT: ${r.content}\nURL: ${r.url}`)
       .join('\n\n---\n\n');
@@ -92,21 +114,22 @@ async function generateSearchQueries(text) {
       messages: [
         {
           role: 'user',
-          content: `Analyze this request and return a JSON array of 1-3 specific search queries needed to answer it fully. Each query should be 5-10 words max. Return ONLY a JSON array, nothing else.
+          content: `Analyze this request and return a JSON array of objects. Each object has "query" (5-8 words, year 2026, business/finance focused) and "topic" (one of: crypto, stocks, dubai, general).
+Return ONLY a JSON array, nothing else. Max 3 objects.
 
 Request: "${text.slice(0, 300)}"
 
-Example output: ["Dubai positive news March 2026", "UAE crypto news 2026", "UAE stock market KPI 2026"]`
+Example output: [{"query":"Dubai business investment growth 2026","topic":"dubai"},{"query":"UAE cryptocurrency regulation adoption 2026","topic":"crypto"},{"query":"DFM ADX stock market performance 2026","topic":"stocks"}]`
         }
       ],
-      max_tokens: 100,
+      max_tokens: 150,
     });
     const content = response.choices[0].message.content.trim();
     const parsed = JSON.parse(content);
-    return Array.isArray(parsed) ? parsed : [text.slice(0, 100)];
+    return Array.isArray(parsed) ? parsed : [{ query: text.slice(0, 100), topic: 'general' }];
   } catch (error) {
     console.error('Query generation error:', error);
-    return [text.slice(0, 100)];
+    return [{ query: text.slice(0, 100), topic: 'general' }];
   }
 }
 
@@ -225,13 +248,13 @@ bot.on('text', async (ctx) => {
 
     if (needsSearch(text)) {
       const queries = await generateSearchQueries(text);
-      console.log('🔍 Search queries:', queries);
+      console.log('🔍 Search queries:', JSON.stringify(queries));
 
-      const searchPromises = queries.map(q => searchWeb(q));
+      const searchPromises = queries.map(q => searchWeb(q.query || q, q.topic || 'general'));
       const searchResultsArr = await Promise.all(searchPromises);
 
       const combinedResults = queries
-        .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q}" ===\n${searchResultsArr[i]}` : null)
+        .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q.query || q}" (${q.topic || 'general'}) ===\n${searchResultsArr[i]}` : null)
         .filter(Boolean)
         .join('\n\n');
 
@@ -281,3 +304,4 @@ console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
