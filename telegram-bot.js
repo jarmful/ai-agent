@@ -195,8 +195,17 @@ bot.on('message', async (msg) => {
     let messages;
 
     if (needsSearch(text)) {
-      console.log('🔍 Searching web for:', text.slice(0, 50));
-      const searchResults = await searchWeb(text);
+      // Generate a clean search query using GPT
+  const queryResponse = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'user', content: `Convert this into a short 5-10 word search query for Google. Return ONLY the query, nothing else: "${text}"` }
+    ],
+    max_tokens: 30,
+  });
+  const searchQuery = queryResponse.choices[0].message.content.trim();
+  console.log('🔍 Searching web for:', searchQuery);
+  const searchResults = await searchWeb(searchQuery);
 
       if (searchResults) {
         // Inject search results as a system message + separate user context
