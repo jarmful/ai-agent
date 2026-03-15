@@ -1,14 +1,14 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
-const { tavily } = require('@tavily/core');
+const tavily = require('tavily');
 const fs = require('fs');
 const path = require('path');
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(TOKEN, { polling: true });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const tavilyClient = tavily({ apiKey: process.env.TAVILY_API_KEY });
+const tavilyClient = new tavily.TavilyClient({ apiKey: process.env.TAVILY_API_KEY });
 
 const ALLOWED_USERS = [266284115];
 
