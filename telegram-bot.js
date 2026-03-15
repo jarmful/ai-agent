@@ -70,6 +70,26 @@ IMPORTANT RULES for using search results:
 - If results are from 2024 or older, mention that and note they may not be the latest
 - IGNORE any results about regional conflicts, military activity, or geopolitical tensions — focus only on business, finance, crypto, and positive developments`;
 
+const DUBAI_PROMPT = `You are compiling a daily Dubai business briefing for Jarmo.
+Format it exactly like this:
+
+📍 DUBAI DAILY — [Today's Date]
+
+Then provide exactly 10 items covering:
+- Real estate developments
+- Business & investment news
+- Infrastructure & transport
+- Tourism & hospitality
+- Tech & innovation
+- Economic milestones
+
+Rules:
+- Each item must have a bold headline and 1-2 sentence summary
+- Use ONLY facts from the search results — no generic statements
+- Include specific names, companies, numbers, dates
+- Skip anything about regional conflict or geopolitical tensions
+- End with: "🎯 Top opportunity today: [one actionable insight for Jarmo]"`;
+
 async function searchWeb(query) {
   try {
     const shortQuery = query.slice(0, 200);
@@ -148,10 +168,61 @@ let conversations = loadMemories();
 
 bot.command('start', (ctx) => {
   const chatId = ctx.chat.id;
-  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all');
+  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/dubai - Daily Dubai briefing\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete all');
   if (!conversations[chatId]) {
     conversations[chatId] = [];
     saveMemories(conversations);
+  }
+});
+
+bot.command('dubai', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+
+  if (!ALLOWED_USERS.includes(userId)) {
+    ctx.reply('❌ Permission denied.');
+    return;
+  }
+
+  await ctx.sendChatAction('typing');
+  ctx.reply('🔍 Searching Dubai news...');
+
+  try {
+    const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+
+    // Run 3 targeted Dubai searches in parallel
+    const [r1, r2, r3] = await Promise.all([
+      searchWeb(`Dubai business investment real estate news ${today}`),
+      searchWeb('Dubai infrastructure tourism tech innovation 2026'),
+      searchWeb('Dubai economic growth milestones March 2026'),
+    ]);
+
+    const combinedResults = [r1, r2, r3].filter(Boolean).join('\n\n===\n\n');
+
+    if (!combinedResults) {
+      ctx.reply('❌ Could not fetch Dubai news right now. Try again in a minute.');
+      return;
+    }
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: DUBAI_PROMPT },
+        {
+          role: 'user',
+          content: `Today is ${today}. Here are the search results:\n\n${combinedResults}\n\nCompile the Dubai daily briefing now.`
+        }
+      ],
+      max_tokens: 1500,
+    });
+
+    const briefing = response.choices[0].message.content;
+    ctx.reply(briefing);
+    console.log(`📍 Dubai briefing delivered`);
+
+  } catch (error) {
+    console.error('Dubai command error:', error);
+    ctx.reply('❌ Error fetching Dubai news.');
   }
 });
 
