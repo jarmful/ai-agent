@@ -1,11 +1,11 @@
 require('dotenv').config();
-const { Bot } = require('grammy');
+const { Telegraf } = require('telegraf');
 const OpenAI = require('openai');
 const tavily = require('tavily');
 const fs = require('fs');
 const path = require('path');
 
-const bot = new Bot(process.env.TELEGRAM_TOKEN);
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const tavilyClient = new tavily.TavilyClient({ apiKey: process.env.TAVILY_API_KEY });
 
@@ -168,7 +168,7 @@ bot.command('clear', (ctx) => {
 
 bot.command('ask', async (ctx) => {
   const chatId = ctx.chat.id;
-  const question = ctx.match;
+  const question = ctx.message.text.replace('/ask', '').trim();
   if (!question) {
     ctx.reply('Usage: /ask <your question>');
     return;
@@ -179,7 +179,7 @@ bot.command('ask', async (ctx) => {
     return;
   }
   try {
-    await ctx.replyWithChatAction('typing');
+    await ctx.sendChatAction('typing');
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
@@ -196,7 +196,7 @@ bot.command('ask', async (ctx) => {
   }
 });
 
-bot.on('message:text', async (ctx) => {
+bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
   const text = ctx.message.text;
@@ -217,7 +217,7 @@ bot.on('message:text', async (ctx) => {
       console.log('💾 Saved to disk');
     }
 
-    await ctx.replyWithChatAction('typing');
+    await ctx.sendChatAction('typing');
     const startTime = Date.now();
     const recentMessages = conversations[chatId].slice(-8);
 
@@ -276,5 +276,8 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-bot.start();
+bot.launch();
 console.log(`🚀 Agent Bebe running on gpt-4o! Memory: ${MEMORY_FILE}`);
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
