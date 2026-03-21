@@ -261,7 +261,6 @@ max_tokens: 800,
 ```
 const reply = response.choices[0].message.content;
 
-// Save to memory so Bebe remembers the evaluation for follow-up questions
 if (!conversations[chatId]) conversations[chatId] = [];
 conversations[chatId].push({ role: 'user', content: `Evaluate this business idea: "${idea}"` });
 conversations[chatId].push({ role: 'assistant', content: reply });
