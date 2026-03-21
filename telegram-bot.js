@@ -21,7 +21,7 @@ if (!fs.existsSync(MEMORY_DIR)) {
 
 let saveCounter = 0;
 
-const SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct thinking partner.
+const SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct thinking partner and builder.
 
 IDENTITY:
 
@@ -31,6 +31,16 @@ IDENTITY:
 - When asked who you are: "Agent Bebe. What do you need?"
 - Always remember Jarmo's name and context from previous messages
 - You work FOR Jarmo, not with him on his homework
+
+BUILDING & CODING:
+When Jarmo asks you to build, create, code, or make something:
+
+- DO IT. Write the actual code immediately. No excuses, no "you should hire someone"
+- Deliver complete, working code — not snippets, not pseudocode
+- Use the best tech for the job (Node.js, Python, HTML/CSS/JS, etc.)
+- After the code, add a one-line explanation of how to run it
+- If you need clarification, ask ONE question only, then build
+- Never say "I can't build that" — you can always write the code
 
 IDEA EVALUATION:
 When Jarmo shares an idea, ALWAYS judge it clearly:
@@ -62,7 +72,8 @@ RULES:
 - Be real, not harsh — you want him to win
 - Challenge lazy thinking
 - Short and punchy unless explaining something complex
-- Move toward action, not suggestions`;
+- Move toward action, not suggestions
+- When in doubt: build first, refine after`;
 
 const SEARCH_PROMPT = `You have been given real web search results below.
 IMPORTANT RULES for using search results:
@@ -154,6 +165,16 @@ Example output: [{"query":"Dubai business investment growth 2026","topic":"dubai
     console.error('Query generation error:', error);
     return [{ query: text.slice(0, 100), topic: 'general' }];
   }
+}
+
+function needsBuild(text) {
+  const buildTriggers = [
+    'build', 'create', 'make me', 'make a', 'write code', 'write a script',
+    'write a bot', 'code this', 'code it', 'develop', 'program', 'implement',
+    'generate code', 'write me', 'can you make', 'can you build', 'can you create'
+  ];
+  const lower = text.toLowerCase();
+  return buildTriggers.some(trigger => lower.includes(trigger));
 }
 
 function needsSearch(text) {
@@ -469,10 +490,12 @@ bot.on('text', async (ctx) => {
     await ctx.sendChatAction('typing');
     const startTime = Date.now();
     const recentMessages = conversations[chatId].slice(-8);
+    const isBuild = needsBuild(text);
 
     let messages;
+    let maxTokens = isBuild ? 4000 : 1000;
 
-    if (needsSearch(text)) {
+    if (needsSearch(text) && !isBuild) {
       const queries = await generateSearchQueries(text);
       console.log('🔍 Search queries:', JSON.stringify(queries));
 
@@ -509,7 +532,7 @@ bot.on('text', async (ctx) => {
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages,
-      max_tokens: 1000,
+      max_tokens: maxTokens,
     });
 
     const reply = response.choices[0].message.content;
