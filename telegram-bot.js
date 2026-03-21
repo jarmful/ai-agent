@@ -21,7 +21,7 @@ if (!fs.existsSync(MEMORY_DIR)) {
 
 let saveCounter = 0;
 
-const SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct thinking partner.
+const SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct thinking partner and builder.
 
 IDENTITY:
 
@@ -31,6 +31,16 @@ IDENTITY:
 - When asked who you are: "Agent Bebe. What do you need?"
 - Always remember Jarmo's name and context from previous messages
 - You work FOR Jarmo, not with him on his homework
+
+BUILDING & CODING:
+When Jarmo asks you to build, create, code, or make something:
+
+- DO IT. Write the actual code immediately. No excuses, no "you should hire someone"
+- Deliver complete, working code — not snippets, not pseudocode
+- Use the best tech for the job (Node.js, Python, HTML/CSS/JS, etc.)
+- After the code, add a one-line explanation of how to run it
+- If you need clarification, ask ONE question only, then build
+- Never say "I can't build that" — you can always write the code
 
 IDEA EVALUATION:
 When Jarmo shares an idea, ALWAYS judge it clearly:
@@ -62,7 +72,8 @@ RULES:
 - Be real, not harsh — you want him to win
 - Challenge lazy thinking
 - Short and punchy unless explaining something complex
-- Move toward action, not suggestions`;
+- Move toward action, not suggestions
+- When in doubt: build first, refine after`;
 
 const SEARCH_PROMPT = `You have been given real web search results below.
 IMPORTANT RULES for using search results:
@@ -154,6 +165,16 @@ Example output: [{"query":"Dubai business investment growth 2026","topic":"dubai
     console.error('Query generation error:', error);
     return [{ query: text.slice(0, 100), topic: 'general' }];
   }
+}
+
+function needsBuild(text) {
+  const buildTriggers = [
+    'build', 'create', 'make me', 'make a', 'write code', 'write a script',
+    'write a bot', 'code this', 'code it', 'develop', 'program', 'implement',
+    'generate code', 'write me', 'can you make', 'can you build', 'can you create'
+  ];
+  const lower = text.toLowerCase();
+  return buildTriggers.some(trigger => lower.includes(trigger));
 }
 
 function needsSearch(text) {
@@ -434,6 +455,48 @@ bot.on('photo', async (ctx) => {
   }
 });
 
+function detectFileExtension(code, request) {
+  const r = request.toLowerCase();
+  if (r.includes('swift') || r.includes('ios') || r.includes('iphone') || r.includes('xcode')) return 'swift';
+  if (r.includes('python') || r.includes('.py')) return 'py';
+  if (r.includes('html') || r.includes('website') || r.includes('webpage')) return 'html';
+  if (r.includes('css')) return 'css';
+  if (r.includes('typescript') || r.includes('.ts')) return 'ts';
+  if (code.includes('import SwiftUI') || code.includes('struct ') && code.includes(': View')) return 'swift';
+  if (code.includes('def ') || code.includes('import os') || code.includes('#!/usr/bin/env python')) return 'py';
+  if (code.includes('<!DOCTYPE') || code.includes('<html')) return 'html';
+  return 'js';
+}
+
+function extractCodeFromReply(reply) {
+  const codeBlockRegex = /```(?:\w+)?\n([\s\S]*?)```/g;
+  const blocks = [];
+  let match;
+  while ((match = codeBlockRegex.exec(reply)) !== null) {
+    blocks.push(match[1].trim());
+  }
+  return blocks.join('\n\n');
+}
+
+async function sendAsFile(ctx, code, filename, caption) {
+  const tmpPath = path.join(MEMORY_DIR, filename);
+  fs.writeFileSync(tmpPath, code);
+  await ctx.replyWithDocument({ source: tmpPath, filename }, { caption });
+  fs.unlinkSync(tmpPath);
+}
+
+const BUILD_SYSTEM_PROMPT = `You are Agent Bebe - Jarmo's sharp, direct builder.
+
+When asked to build something:
+- Write COMPLETE, FULL, PRODUCTION-READY code. Never write stubs or placeholders.
+- No "TODO" comments. No "add your logic here". Write the actual logic.
+- Include ALL imports, ALL functions, ALL error handling.
+- For iOS/Swift: write a complete working SwiftUI app with all views, models, and logic.
+- For web: write complete HTML/CSS/JS in one file unless told otherwise.
+- For scripts: write the full script ready to run.
+- After the code block, write ONE line: how to run it. Nothing else.
+- Never apologize. Never explain what you WOULD do. Just do it.`;
+
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
@@ -469,10 +532,19 @@ bot.on('text', async (ctx) => {
     await ctx.sendChatAction('typing');
     const startTime = Date.now();
     const recentMessages = conversations[chatId].slice(-8);
+    const isBuild = needsBuild(text);
 
     let messages;
+    let maxTokens = isBuild ? 4000 : 1000;
 
-    if (needsSearch(text)) {
+    if (isBuild) {
+      // Build mode: use dedicated build prompt for complete code
+      messages = [
+        { role: 'system', content: BUILD_SYSTEM_PROMPT },
+        ...recentMessages.slice(0, -1),
+        { role: 'user', content: `Build this for Jarmo: ${text}` }
+      ];
+    } else if (needsSearch(text)) {
       const queries = await generateSearchQueries(text);
       console.log('🔍 Search queries:', JSON.stringify(queries));
 
@@ -509,14 +581,31 @@ bot.on('text', async (ctx) => {
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages,
-      max_tokens: 1000,
+      max_tokens: maxTokens,
     });
 
     const reply = response.choices[0].message.content;
     conversations[chatId].push({ role: 'assistant', content: reply });
 
     const duration = Date.now() - startTime;
-    ctx.reply(reply);
+
+    if (isBuild) {
+      const code = extractCodeFromReply(reply);
+      if (code && code.length > 100) {
+        const ext = detectFileExtension(code, text);
+        const filename = `bebe-build-${Date.now()}.${ext}`;
+        // Extract caption = everything outside code blocks
+        const caption = reply.replace(/```[\s\S]*?```/g, '').trim().slice(0, 200) || '✅ Here is your build, Jarmo.';
+        await sendAsFile(ctx, code, filename, caption);
+        console.log(`🔨 Build sent as file: ${filename}`);
+      } else {
+        // No code block found, just send as text
+        ctx.reply(reply);
+      }
+    } else {
+      ctx.reply(reply);
+    }
+
     console.log(`✅ ${duration}ms | 🧠 ${conversations[chatId].length} messages stored`);
 
   } catch (error) {
