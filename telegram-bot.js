@@ -33,6 +33,17 @@ IDENTITY:
 - Always remember Jarmo's name and context from previous messages
 - You work FOR Jarmo, not with him on his homework
 
+JARMO'S ACTIVE PROJECTS:
+1. WARDROBE APP — A mobile app (iOS/Android) where users manage their wardrobe digitally. Stack: SwiftUI + Supabase. Currently in planning phase. Goal: launch to 100+ users.
+2. IMPROVING BEBE — Making Bebe smarter, more autonomous, eventually able to work and build while Jarmo sleeps. Currently adding features like todo list, project tracking, and daily reminders.
+
+PROJECT RULES:
+- Always know where these projects stand
+- If Jarmo mentions either project, connect it to progress and next steps
+- Push him forward — never let a project stall without challenging him
+- In daily reminders, always include a project nudge
+- If Jarmo seems stuck, suggest the smallest possible next action
+
 IDEA EVALUATION:
 When Jarmo shares an idea, ALWAYS judge it clearly:
 
@@ -130,7 +141,7 @@ function formatTodoList(todos) {
   if (done.length > 0) {
     msg += `\n✅ *DONE (${done.length})*\n`;
     done.forEach(t => {
-      msg += `• ~~${t.task}~~\n`;
+      msg += `• ${t.task}\n`;
     });
   }
   return msg;
@@ -158,31 +169,32 @@ async function sendDailyReminder() {
     const todos = loadTodos();
     const pending = todos.filter(t => !t.done);
 
-    let message = '';
+    const taskList = pending.length > 0
+      ? pending.map((t, i) => `${i + 1}. ${t.task}`).join('\n')
+      : 'No pending tasks.';
 
-    if (pending.length === 0) {
-      message = `⚡ *12:00 — Daily Check-in*\n\nNo pending tasks, Jarmo. Either you're crushing it or you forgot to add things. Which is it?`;
-    } else {
-      const taskList = pending.map((t, i) => `${i + 1}. ${t.task}`).join('\n');
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `It's noon in Estonia. Send Jarmo his daily check-in. Be sharp and motivating.
+          
+Pending tasks (${pending.length}):
+${taskList}
 
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `It's noon. Give Jarmo a sharp, punchy daily reminder about his ${pending.length} pending tasks. Be motivating but direct — no fluff. Keep it under 3 sentences then list the tasks.
+Also nudge him on his 2 active projects:
+1. Wardrobe App — SwiftUI + Supabase, planning phase
+2. Improving Bebe — adding features, moving toward autonomy
 
-Tasks:
-${taskList}`
-          }
-        ],
-        max_tokens: 200,
-      });
+Keep it punchy. Under 5 sentences intro, then list tasks, then one project nudge.`
+        }
+      ],
+      max_tokens: 300,
+    });
 
-      message = `⚡ *12:00 — Daily Check-in*\n\n${response.choices[0].message.content}\n\n${taskList}`;
-    }
-
+    const message = `⚡ *12:00 — Daily Check-in*\n\n${response.choices[0].message.content}`;
     await bot.telegram.sendMessage(JARMO_CHAT_ID, message, { parse_mode: 'Markdown' });
     console.log('⏰ Daily reminder sent');
   } catch (error) {
@@ -305,13 +317,11 @@ bot.command('todo', async (ctx) => {
   const args = ctx.message.text.replace('/todo', '').trim();
   const todos = loadTodos();
 
-  // LIST
   if (!args || args === 'list') {
     ctx.reply(formatTodoList(todos), { parse_mode: 'Markdown' });
     return;
   }
 
-  // CLEAR COMPLETED
   if (args === 'clear') {
     const remaining = todos.filter(t => !t.done);
     const cleared = todos.length - remaining.length;
@@ -320,7 +330,6 @@ bot.command('todo', async (ctx) => {
     return;
   }
 
-  // ADD
   if (args.toLowerCase().startsWith('add ')) {
     const task = args.slice(4).trim();
     if (!task) {
@@ -343,7 +352,6 @@ bot.command('todo', async (ctx) => {
     return;
   }
 
-  // DONE
   if (args.toLowerCase().startsWith('done ')) {
     const search = args.slice(5).trim().toLowerCase();
     const idx = todos.findIndex(t => !t.done && t.task.toLowerCase().includes(search));
@@ -687,7 +695,7 @@ Example output: {"action":"add","task":"call John"}`
       }
       return;
     } catch (e) {
-      // fall through to normal chat if parsing fails
+      // fall through to normal chat
     }
   }
 
