@@ -16,6 +16,7 @@ const JARMO_CHAT_ID = 266284115;
 const MEMORY_DIR = process.env.RAILWAY_ENVIRONMENT ? '/app/data' : __dirname;
 const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.json');
 const TODO_FILE = path.join(MEMORY_DIR, 'todos.json');
+const PROJECTS_FILE = path.join(MEMORY_DIR, 'projects.json');
 
 if (!fs.existsSync(MEMORY_DIR)) {
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
@@ -104,6 +105,53 @@ Rules:
 - Skip anything about regional conflict or geopolitical tensions
 - End with: "🎯 Top opportunity today: [one actionable insight for Jarmo]"`;
 
+// ─── PROJECT FUNCTIONS ────────────────────────────────────────────────────────
+
+function loadProjects() {
+  try {
+    if (fs.existsSync(PROJECTS_FILE)) {
+      return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
+    }
+  } catch (error) {
+    console.error('Error loading projects:', error);
+  }
+  return {
+    wardrobe: {
+      name: 'Wardrobe App',
+      status: 'Planning phase',
+      updates: []
+    },
+    bebe: {
+      name: 'Improving Bebe',
+      status: 'Active development',
+      updates: []
+    }
+  };
+}
+
+function saveProjects(projects) {
+  try {
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+  } catch (error) {
+    console.error('Error saving projects:', error);
+  }
+}
+
+function formatProjects(projects) {
+  let msg = '🗂 *ACTIVE PROJECTS*\n\n';
+  for (const key of Object.keys(projects)) {
+    const p = projects[key];
+    msg += `*${p.name}*\n`;
+    msg += `📍 Status: ${p.status}\n`;
+    if (p.updates && p.updates.length > 0) {
+      const last = p.updates[p.updates.length - 1];
+      msg += `🕐 Last update: ${last.text} (${new Date(last.date).toLocaleDateString()})\n`;
+    }
+    msg += '\n';
+  }
+  return msg;
+}
+
 // ─── TODO FUNCTIONS ───────────────────────────────────────────────────────────
 
 function loadTodos() {
@@ -167,11 +215,16 @@ function scheduleDaily() {
 async function sendDailyReminder() {
   try {
     const todos = loadTodos();
+    const projects = loadProjects();
     const pending = todos.filter(t => !t.done);
 
     const taskList = pending.length > 0
       ? pending.map((t, i) => `${i + 1}. ${t.task}`).join('\n')
       : 'No pending tasks.';
+
+    const projectSummary = Object.values(projects)
+      .map(p => `${p.name}: ${p.status}`)
+      .join('\n');
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
@@ -180,13 +233,12 @@ async function sendDailyReminder() {
         {
           role: 'user',
           content: `It's noon in Estonia. Send Jarmo his daily check-in. Be sharp and motivating.
-          
+
 Pending tasks (${pending.length}):
 ${taskList}
 
-Also nudge him on his 2 active projects:
-1. Wardrobe App — SwiftUI + Supabase, planning phase
-2. Improving Bebe — adding features, moving toward autonomy
+Project status:
+${projectSummary}
 
 Keep it punchy. Under 5 sentences intro, then list tasks, then one project nudge.`
         }
@@ -298,16 +350,76 @@ let conversations = loadMemories();
 
 bot.command('start', (ctx) => {
   const chatId = ctx.chat.id;
-  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/todo add <task> - Add a task\n/todo done <task> - Mark task done\n/todo list - See all tasks\n/todo clear - Clear completed tasks\n/dubai - Daily Dubai briefing\n/evaluate <idea> - Evaluate a business idea\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete conversation\n\n📸 Send me an image and I\'ll analyze it.\n\n⏰ Daily reminder at 12:00 Estonian time.');
+  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/todo add <task> - Add a task\n/todo done <task> - Mark task done\n/todo list - See all tasks\n/todo clear - Clear completed tasks\n/project list - See all projects\n/project update <name> <progress> - Update project\n/dubai - Daily Dubai briefing\n/evaluate <idea> - Evaluate a business idea\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete conversation\n\n📸 Send me an image and I\'ll analyze it.\n\n⏰ Daily reminder at 12:00 Estonian time.');
   if (!conversations[chatId]) {
     conversations[chatId] = [];
     saveMemories(conversations);
   }
 });
 
+bot.command('project', async (ctx) => {
+  const userId = ctx.from.id;
+
+  if (!ALLOWED_USERS.includes(userId)) {
+    ctx.reply('❌ Permission denied.');
+    return;
+  }
+
+  const args = ctx.message.text.replace('/project', '').trim();
+  const projects = loadProjects();
+
+  // LIST
+  if (!args || args === 'list') {
+    ctx.reply(formatProjects(projects), { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // UPDATE — /project update wardrobe <progress text>
+  if (args.toLowerCase().startsWith('update ')) {
+    const rest = args.slice(7).trim();
+    const spaceIdx = rest.indexOf(' ');
+
+    if (spaceIdx === -1) {
+      ctx.reply('Usage: /project update <wardrobe|bebe> <what you did>');
+      return;
+    }
+
+    const projectKey = rest.slice(0, spaceIdx).toLowerCase();
+    const progressText = rest.slice(spaceIdx + 1).trim();
+
+    if (!projects[projectKey]) {
+      ctx.reply(`❌ Unknown project "${projectKey}". Use: wardrobe or bebe`);
+      return;
+    }
+
+    projects[projectKey].status = progressText;
+    projects[projectKey].updates.push({
+      text: progressText,
+      date: new Date().toISOString()
+    });
+    saveProjects(projects);
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `Jarmo just updated his "${projects[projectKey].name}" project with: "${progressText}". Acknowledge it in 1-2 sharp sentences and suggest the next logical step.`
+        }
+      ],
+      max_tokens: 100,
+    });
+
+    ctx.reply(`📍 *${projects[projectKey].name}* updated!\n\n${response.choices[0].message.content}`, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  ctx.reply('Commands:\n/project list\n/project update <wardrobe|bebe> <progress>');
+});
+
 bot.command('todo', async (ctx) => {
   const userId = ctx.from.id;
-  const chatId = ctx.chat.id;
 
   if (!ALLOWED_USERS.includes(userId)) {
     ctx.reply('❌ Permission denied.');
@@ -344,7 +456,7 @@ bot.command('todo', async (ctx) => {
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `Jarmo just added a task to his to-do list: "${task}". Acknowledge it in one sharp sentence. Total pending tasks: ${pending}.` }
+        { role: 'user', content: `Jarmo just added a task: "${task}". Acknowledge in one sharp sentence. Total pending: ${pending}.` }
       ],
       max_tokens: 60,
     });
@@ -364,14 +476,13 @@ bot.command('todo', async (ctx) => {
     todos[idx].done = true;
     todos[idx].completedAt = new Date().toISOString();
     saveTodos(todos);
-
     const pending = todos.filter(t => !t.done).length;
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `Jarmo just completed a task: "${todos[idx].task}". Congratulate him in one sharp punchy sentence. He has ${pending} tasks still pending.` }
+        { role: 'user', content: `Jarmo completed: "${todos[idx].task}". Congratulate in one punchy sentence. ${pending} tasks still pending.` }
       ],
       max_tokens: 60,
     });
@@ -766,7 +877,7 @@ Example output: {"action":"add","task":"call John"}`
 
 bot.launch();
 scheduleDaily();
-console.log(`🚀 Agent Bebe running! Memory: ${MEMORY_FILE} | Todos: ${TODO_FILE}`);
+console.log(`🚀 Agent Bebe running! Memory: ${MEMORY_FILE} | Todos: ${TODO_FILE} | Projects: ${PROJECTS_FILE}`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
