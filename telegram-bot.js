@@ -2,25 +2,20 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const OpenAI = require('openai');
 const tavily = require('tavily');
-const fs = require('fs');
-const path = require('path');
 const https = require('https');
+const { Pool } = require('pg');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const tavilyClient = new tavily.TavilyClient({ apiKey: process.env.TAVILY_API_KEY });
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
 const ALLOWED_USERS = [266284115];
 const JARMO_CHAT_ID = 266284115;
-
-const MEMORY_DIR = process.env.RAILWAY_ENVIRONMENT ? '/app/data' : __dirname;
-const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.json');
-const TODO_FILE = path.join(MEMORY_DIR, 'todos.json');
-const PROJECTS_FILE = path.join(MEMORY_DIR, 'projects.json');
-
-if (!fs.existsSync(MEMORY_DIR)) {
-  fs.mkdirSync(MEMORY_DIR, { recursive: true });
-}
 
 let saveCounter = 0;
 
@@ -105,72 +100,71 @@ Rules:
 - Skip anything about regional conflict or geopolitical tensions
 - End with: "🎯 Top opportunity today: [one actionable insight for Jarmo]"`;
 
-// ─── PROJECT FUNCTIONS ────────────────────────────────────────────────────────
+// ─── DATABASE FUNCTIONS ───────────────────────────────────────────────────────
 
-function loadProjects() {
-  try {
-    if (fs.existsSync(PROJECTS_FILE)) {
-      return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading projects:', error);
-  }
-  return {
-    wardrobe: {
-      name: 'Wardrobe App',
-      status: 'Planning phase',
-      updates: []
-    },
-    bebe: {
-      name: 'Improving Bebe',
-      status: 'Active development',
-      updates: []
-    }
-  };
+async function getTodos() {
+  const res = await pool.query('SELECT * FROM todos ORDER BY added ASC');
+  return res.rows;
 }
 
-function saveProjects(projects) {
-  try {
-    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
-  } catch (error) {
-    console.error('Error saving projects:', error);
-  }
+async function addTodo(task) {
+  await pool.query('INSERT INTO todos (task, done) VALUES ($1, false)', [task]);
 }
 
-function formatProjects(projects) {
-  let msg = '🗂 *ACTIVE PROJECTS*\n\n';
-  for (const key of Object.keys(projects)) {
-    const p = projects[key];
-    msg += `*${p.name}*\n`;
-    msg += `📍 Status: ${p.status}\n`;
-    if (p.updates && p.updates.length > 0) {
-      const last = p.updates[p.updates.length - 1];
-      msg += `🕐 Last update: ${last.text} (${new Date(last.date).toLocaleDateString()})\n`;
-    }
-    msg += '\n';
-  }
-  return msg;
+async function markTodoDone(id) {
+  await pool.query('UPDATE todos SET done = true, completed_at = NOW() WHERE id = $1', [id]);
 }
 
-// ─── TODO FUNCTIONS ───────────────────────────────────────────────────────────
-
-function loadTodos() {
-  try {
-    if (fs.existsSync(TODO_FILE)) {
-      return JSON.parse(fs.readFileSync(TODO_FILE, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading todos:', error);
-  }
-  return [];
+async function clearDoneTodos() {
+  const res = await pool.query('DELETE FROM todos WHERE done = true');
+  return res.rowCount;
 }
 
-function saveTodos(todos) {
-  try {
-    fs.writeFileSync(TODO_FILE, JSON.stringify(todos, null, 2));
-  } catch (error) {
-    console.error('Error saving todos:', error);
+async function getConversation(chatId) {
+  const res = await pool.query(
+    'SELECT role, content FROM conversations WHERE chat_id = $1 ORDER BY created_at ASC',
+    [String(chatId)]
+  );
+  return res.rows;
+}
+
+async function addMessage(chatId, role, content) {
+  await pool.query(
+    'INSERT INTO conversations (chat_id, role, content) VALUES ($1, $2, $3)',
+    [String(chatId), role, content]
+  );
+}
+
+async function clearConversation(chatId) {
+  await pool.query('DELETE FROM conversations WHERE chat_id = $1', [String(chatId)]);
+}
+
+async function getProjects() {
+  const projects = await pool.query('SELECT * FROM projects ORDER BY id ASC');
+  const updates = await pool.query('SELECT * FROM project_updates ORDER BY created_at DESC');
+
+  const result = {};
+  for (const p of projects.rows) {
+    const lastUpdate = updates.rows.find(u => u.project_key === p.key);
+    result[p.key] = {
+      name: p.name,
+      status: p.status,
+      lastUpdate: lastUpdate ? lastUpdate.text : null,
+      lastUpdateDate: lastUpdate ? lastUpdate.created_at : null
+    };
   }
+  return result;
+}
+
+async function updateProject(key, status) {
+  await pool.query(
+    'UPDATE projects SET status = $1, updated_at = NOW() WHERE key = $2',
+    [status, key]
+  );
+  await pool.query(
+    'INSERT INTO project_updates (project_key, text) VALUES ($1, $2)',
+    [key, status]
+  );
 }
 
 function formatTodoList(todos) {
@@ -195,7 +189,21 @@ function formatTodoList(todos) {
   return msg;
 }
 
-// ─── DAILY REMINDER (9am UTC = 12pm Estonian) ────────────────────────────────
+function formatProjects(projects) {
+  let msg = '🗂 *ACTIVE PROJECTS*\n\n';
+  for (const key of Object.keys(projects)) {
+    const p = projects[key];
+    msg += `*${p.name}*\n`;
+    msg += `📍 Status: ${p.status}\n`;
+    if (p.lastUpdate) {
+      msg += `🕐 Last update: ${p.lastUpdate}\n`;
+    }
+    msg += '\n';
+  }
+  return msg;
+}
+
+// ─── DAILY REMINDER ───────────────────────────────────────────────────────────
 
 function scheduleDaily() {
   const now = new Date();
@@ -214,8 +222,8 @@ function scheduleDaily() {
 
 async function sendDailyReminder() {
   try {
-    const todos = loadTodos();
-    const projects = loadProjects();
+    const todos = await getTodos();
+    const projects = await getProjects();
     const pending = todos.filter(t => !t.done);
 
     const taskList = pending.length > 0
@@ -325,131 +333,37 @@ function needsSearch(text) {
   return searchTriggers.some(trigger => lower.includes(trigger));
 }
 
-function loadMemories() {
-  try {
-    if (fs.existsSync(MEMORY_FILE)) {
-      return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading memories:', error);
-  }
-  return {};
-}
-
-function saveMemories(memories) {
-  try {
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memories, null, 2));
-  } catch (error) {
-    console.error('Error saving memories:', error);
-  }
-}
-
-let conversations = loadMemories();
-
 // ─── COMMANDS ─────────────────────────────────────────────────────────────────
 
-bot.command('start', (ctx) => {
+bot.command('start', async (ctx) => {
   const chatId = ctx.chat.id;
-  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/todo add <task> - Add a task\n/todo done <task> - Mark task done\n/todo list - See all tasks\n/todo clear - Clear completed tasks\n/project list - See all projects\n/project update <name> <progress> - Update project\n/dubai - Daily Dubai briefing\n/evaluate <idea> - Evaluate a business idea\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete conversation\n\n📸 Send me an image and I\'ll analyze it.\n\n⏰ Daily reminder at 12:00 Estonian time.');
-  if (!conversations[chatId]) {
-    conversations[chatId] = [];
-    saveMemories(conversations);
-  }
-});
-
-bot.command('project', async (ctx) => {
-  const userId = ctx.from.id;
-
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
-  }
-
-  const args = ctx.message.text.replace('/project', '').trim();
-  const projects = loadProjects();
-
-  // LIST
-  if (!args || args === 'list') {
-    ctx.reply(formatProjects(projects), { parse_mode: 'Markdown' });
-    return;
-  }
-
-  // UPDATE — /project update wardrobe <progress text>
-  if (args.toLowerCase().startsWith('update ')) {
-    const rest = args.slice(7).trim();
-    const spaceIdx = rest.indexOf(' ');
-
-    if (spaceIdx === -1) {
-      ctx.reply('Usage: /project update <wardrobe|bebe> <what you did>');
-      return;
-    }
-
-    const projectKey = rest.slice(0, spaceIdx).toLowerCase();
-    const progressText = rest.slice(spaceIdx + 1).trim();
-
-    if (!projects[projectKey]) {
-      ctx.reply(`❌ Unknown project "${projectKey}". Use: wardrobe or bebe`);
-      return;
-    }
-
-    projects[projectKey].status = progressText;
-    projects[projectKey].updates.push({
-      text: progressText,
-      date: new Date().toISOString()
-    });
-    saveProjects(projects);
-
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `Jarmo just updated his "${projects[projectKey].name}" project with: "${progressText}". Acknowledge it in 1-2 sharp sentences and suggest the next logical step.`
-        }
-      ],
-      max_tokens: 100,
-    });
-
-    ctx.reply(`📍 *${projects[projectKey].name}* updated!\n\n${response.choices[0].message.content}`, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  ctx.reply('Commands:\n/project list\n/project update <wardrobe|bebe> <progress>');
+  ctx.reply('🤖 Agent Bebe here. What do you need?\n\n/todo add <task> - Add a task\n/todo done <task> - Mark task done\n/todo list - See all tasks\n/todo clear - Clear completed tasks\n/project list - See all projects\n/project update <n> <progress> - Update project\n/dubai - Daily Dubai briefing\n/evaluate <idea> - Evaluate a business idea\n/ask <q> - Search all memories\n/recall - Stats\n/clear - Delete conversation\n\n📸 Send me an image and I\'ll analyze it.\n\n⏰ Daily reminder at 12:00 Estonian time.');
 });
 
 bot.command('todo', async (ctx) => {
   const userId = ctx.from.id;
-
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
-  }
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
 
   const args = ctx.message.text.replace('/todo', '').trim();
-  const todos = loadTodos();
 
   if (!args || args === 'list') {
+    const todos = await getTodos();
     ctx.reply(formatTodoList(todos), { parse_mode: 'Markdown' });
     return;
   }
 
   if (args === 'clear') {
-    const remaining = todos.filter(t => !t.done);
-    const cleared = todos.length - remaining.length;
-    saveTodos(remaining);
-    ctx.reply(`🗑️ Cleared ${cleared} completed tasks. ${remaining.length} pending.`);
+    const cleared = await clearDoneTodos();
+    const todos = await getTodos();
+    ctx.reply(`🗑️ Cleared ${cleared} completed tasks. ${todos.length} pending.`);
     return;
   }
 
   if (args.toLowerCase().startsWith('add ')) {
     const task = args.slice(4).trim();
-    if (!task) {
-      ctx.reply('Usage: /todo add <task>');
-      return;
-    }
-    todos.push({ task, done: false, added: new Date().toISOString() });
-    saveTodos(todos);
+    if (!task) { ctx.reply('Usage: /todo add <task>'); return; }
+    await addTodo(task);
+    const todos = await getTodos();
     const pending = todos.filter(t => !t.done).length;
 
     const response = await openai.chat.completions.create({
@@ -466,31 +380,68 @@ bot.command('todo', async (ctx) => {
 
   if (args.toLowerCase().startsWith('done ')) {
     const search = args.slice(5).trim().toLowerCase();
-    const idx = todos.findIndex(t => !t.done && t.task.toLowerCase().includes(search));
+    const todos = await getTodos();
+    const todo = todos.find(t => !t.done && t.task.toLowerCase().includes(search));
 
-    if (idx === -1) {
-      ctx.reply(`❌ Can't find that task. Use /todo list to see your tasks.`);
-      return;
-    }
+    if (!todo) { ctx.reply(`❌ Can't find that task. Use /todo list to see your tasks.`); return; }
 
-    todos[idx].done = true;
-    todos[idx].completedAt = new Date().toISOString();
-    saveTodos(todos);
-    const pending = todos.filter(t => !t.done).length;
+    await markTodoDone(todo.id);
+    const remaining = todos.filter(t => !t.done && t.id !== todo.id).length;
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `Jarmo completed: "${todos[idx].task}". Congratulate in one punchy sentence. ${pending} tasks still pending.` }
+        { role: 'user', content: `Jarmo completed: "${todo.task}". Congratulate in one punchy sentence. ${remaining} tasks still pending.` }
       ],
       max_tokens: 60,
     });
-    ctx.reply(`✅ Done: ${todos[idx].task}\n\n${response.choices[0].message.content}`);
+    ctx.reply(`✅ Done: ${todo.task}\n\n${response.choices[0].message.content}`);
     return;
   }
 
   ctx.reply('Commands:\n/todo list\n/todo add <task>\n/todo done <task>\n/todo clear');
+});
+
+bot.command('project', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
+
+  const args = ctx.message.text.replace('/project', '').trim();
+
+  if (!args || args === 'list') {
+    const projects = await getProjects();
+    ctx.reply(formatProjects(projects), { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (args.toLowerCase().startsWith('update ')) {
+    const rest = args.slice(7).trim();
+    const spaceIdx = rest.indexOf(' ');
+    if (spaceIdx === -1) { ctx.reply('Usage: /project update <wardrobe|bebe> <what you did>'); return; }
+
+    const projectKey = rest.slice(0, spaceIdx).toLowerCase();
+    const progressText = rest.slice(spaceIdx + 1).trim();
+
+    const projects = await getProjects();
+    if (!projects[projectKey]) { ctx.reply(`❌ Unknown project "${projectKey}". Use: wardrobe or bebe`); return; }
+
+    await updateProject(projectKey, progressText);
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: `Jarmo just updated his "${projects[projectKey].name}" project with: "${progressText}". Acknowledge in 1-2 sharp sentences and suggest the next logical step.` }
+      ],
+      max_tokens: 100,
+    });
+
+    ctx.reply(`📍 *${projects[projectKey].name}* updated!\n\n${response.choices[0].message.content}`, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  ctx.reply('Commands:\n/project list\n/project update <wardrobe|bebe> <progress>');
 });
 
 bot.command('evaluate', async (ctx) => {
@@ -498,15 +449,8 @@ bot.command('evaluate', async (ctx) => {
   const userId = ctx.from.id;
   const idea = ctx.message.text.replace('/evaluate', '').trim();
 
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
-  }
-
-  if (!idea) {
-    ctx.reply('💡 Give me an idea to evaluate.\n\nExample: /evaluate a Dubai dog walking app');
-    return;
-  }
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
+  if (!idea) { ctx.reply('💡 Example: /evaluate a Dubai dog walking app'); return; }
 
   await ctx.sendChatAction('typing');
   ctx.reply('🔍 Researching your idea...');
@@ -534,15 +478,10 @@ ${combined}
 Format your response exactly like this:
 
 💡 IDEA: [restate the idea clearly]
-
 📊 MARKET SIZE: [real numbers from research]
-
 ⚔️ COMPETITION: [who's already doing it, how crowded]
-
 ✅ VERDICT: [VIABLE / NOT VIABLE / NEEDS TWIST] — one bold sentence why
-
 💰 MONEY POTENTIAL: [realistic revenue estimate in year 1]
-
 🎯 FIRST MOVE: [the single most important action to take this week]
 
 Be direct. Use real data. No fluff.`
@@ -552,14 +491,9 @@ Be direct. Use real data. No fluff.`
     });
 
     const reply = response.choices[0].message.content;
-
-    if (!conversations[chatId]) conversations[chatId] = [];
-    conversations[chatId].push({ role: 'user', content: `Evaluate this business idea: "${idea}"` });
-    conversations[chatId].push({ role: 'assistant', content: reply });
-    saveMemories(conversations);
-
+    await addMessage(chatId, 'user', `Evaluate this business idea: "${idea}"`);
+    await addMessage(chatId, 'assistant', reply);
     ctx.reply(reply);
-    console.log(`💡 Idea evaluated: ${idea}`);
 
   } catch (error) {
     console.error('Evaluate error:', error);
@@ -568,13 +502,8 @@ Be direct. Use real data. No fluff.`
 });
 
 bot.command('dubai', async (ctx) => {
-  const chatId = ctx.chat.id;
   const userId = ctx.from.id;
-
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
-  }
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
 
   await ctx.sendChatAction('typing');
   ctx.reply('🔍 Searching Dubai news...');
@@ -586,66 +515,51 @@ bot.command('dubai', async (ctx) => {
       searchWeb(`Dubai business investment real estate news ${today}`),
       searchWeb(`Dubai infrastructure tourism tech innovation ${today}`),
       searchWeb(`Dubai economic growth milestones ${today}`),
-      searchWeb(`Dubai UAE resilience stability amid regional conflict ${today}`),
+      searchWeb(`Dubai UAE resilience stability ${today}`),
     ]);
 
     const combinedResults = [r1, r2, r3, r4].filter(Boolean).join('\n\n===\n\n');
-
-    if (!combinedResults) {
-      ctx.reply('❌ Could not fetch Dubai news right now. Try again in a minute.');
-      return;
-    }
+    if (!combinedResults) { ctx.reply('❌ Could not fetch Dubai news right now.'); return; }
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: DUBAI_PROMPT },
-        {
-          role: 'user',
-          content: `Today is ${today}. Here are the search results:\n\n${combinedResults}\n\nCompile the Dubai daily briefing now.`
-        }
+        { role: 'user', content: `Today is ${today}. Here are the search results:\n\n${combinedResults}\n\nCompile the Dubai daily briefing now.` }
       ],
       max_tokens: 1500,
     });
 
     ctx.reply(response.choices[0].message.content);
-    console.log(`📍 Dubai briefing delivered`);
-
   } catch (error) {
     console.error('Dubai command error:', error);
     ctx.reply('❌ Error fetching Dubai news.');
   }
 });
 
-bot.command('recall', (ctx) => {
+bot.command('recall', async (ctx) => {
   const chatId = ctx.chat.id;
-  const memory = conversations[chatId] || [];
-  const userCount = memory.filter(m => m.role === 'user').length;
-  const todos = loadTodos();
+  const conversation = await getConversation(chatId);
+  const userCount = conversation.filter(m => m.role === 'user').length;
+  const todos = await getTodos();
   const pending = todos.filter(t => !t.done).length;
   const done = todos.filter(t => t.done).length;
-  ctx.reply(`📊 Conversation: ${memory.length} messages\n👤 Your messages: ${userCount}\n📋 Tasks pending: ${pending}\n✅ Tasks done: ${done}`);
+  ctx.reply(`📊 Conversation: ${conversation.length} messages\n👤 Your messages: ${userCount}\n📋 Tasks pending: ${pending}\n✅ Tasks done: ${done}`);
 });
 
-bot.command('clear', (ctx) => {
-  const chatId = ctx.chat.id;
-  conversations[chatId] = [];
-  saveMemories(conversations);
+bot.command('clear', async (ctx) => {
+  await clearConversation(ctx.chat.id);
   ctx.reply('🗑️ Conversation cleared!');
 });
 
 bot.command('ask', async (ctx) => {
   const chatId = ctx.chat.id;
   const question = ctx.message.text.replace('/ask', '').trim();
-  if (!question) {
-    ctx.reply('Usage: /ask <your question>');
-    return;
-  }
-  const allMemories = conversations[chatId] || [];
-  if (allMemories.length === 0) {
-    ctx.reply('📝 No memories yet!');
-    return;
-  }
+  if (!question) { ctx.reply('Usage: /ask <your question>'); return; }
+
+  const allMemories = await getConversation(chatId);
+  if (allMemories.length === 0) { ctx.reply('📝 No memories yet!'); return; }
+
   try {
     await ctx.sendChatAction('typing');
     const response = await openai.chat.completions.create({
@@ -659,12 +573,11 @@ bot.command('ask', async (ctx) => {
     });
     ctx.reply('🔍 ' + response.choices[0].message.content);
   } catch (error) {
-    console.error('Error in /ask:', error);
     ctx.reply('❌ Error!');
   }
 });
 
-// ─── NATURAL LANGUAGE TODO DETECTION ─────────────────────────────────────────
+// ─── NATURAL LANGUAGE TODO ────────────────────────────────────────────────────
 
 function detectTodoIntent(text) {
   const lower = text.toLowerCase();
@@ -683,26 +596,16 @@ function detectTodoIntent(text) {
 bot.on('photo', async (ctx) => {
   const userId = ctx.from.id;
   const chatId = ctx.chat.id;
-
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
-  }
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
 
   try {
     await ctx.sendChatAction('typing');
-
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     const caption = ctx.message.caption || 'What do you see in this image? Give me your direct take.';
 
     let replyContext = '';
-    if (ctx.message.reply_to_message) {
-      const replied = ctx.message.reply_to_message;
-      if (replied.text) {
-        replyContext = `\n\n[Jarmo is replying to this message: "${replied.text}"]`;
-      } else if (replied.caption) {
-        replyContext = `\n\n[Jarmo is replying to a message with caption: "${replied.caption}"]`;
-      }
+    if (ctx.message.reply_to_message?.text) {
+      replyContext = `\n\n[Jarmo is replying to: "${ctx.message.reply_to_message.text}"]`;
     }
 
     const fileLink = await ctx.telegram.getFileLink(photo.file_id);
@@ -724,13 +627,9 @@ bot.on('photo', async (ctx) => {
     });
 
     const reply = response.choices[0].message.content;
-
-    if (!conversations[chatId]) conversations[chatId] = [];
-    conversations[chatId].push({ role: 'user', content: `[Sent an image] ${caption}${replyContext}` });
-    conversations[chatId].push({ role: 'assistant', content: reply });
-
+    await addMessage(chatId, 'user', `[Sent an image] ${caption}${replyContext}`);
+    await addMessage(chatId, 'assistant', reply);
     ctx.reply(reply);
-    console.log('📸 Image analyzed');
 
   } catch (error) {
     console.error('Image error:', error);
@@ -743,26 +642,16 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   let text = ctx.message.text;
 
-  if (!ALLOWED_USERS.includes(userId)) {
-    ctx.reply('❌ Permission denied.');
-    return;
+  if (!ALLOWED_USERS.includes(userId)) { ctx.reply('❌ Permission denied.'); return; }
+
+  if (ctx.message.reply_to_message?.text) {
+    text = `[Replying to: "${ctx.message.reply_to_message.text}"]\n\n${text}`;
   }
 
-  if (ctx.message.reply_to_message) {
-    const replied = ctx.message.reply_to_message;
-    if (replied.text) {
-      text = `[Replying to: "${replied.text}"]\n\n${text}`;
-    } else if (replied.caption) {
-      text = `[Replying to message with caption: "${replied.caption}"]\n\n${text}`;
-    } else if (replied.photo) {
-      text = `[Replying to an image]\n\n${text}`;
-    }
-  }
-
-  // Natural language todo detection
+  // Natural language todo
   const todoIntent = detectTodoIntent(text);
   if (todoIntent === 'list') {
-    const todos = loadTodos();
+    const todos = await getTodos();
     ctx.reply(formatTodoList(todos), { parse_mode: 'Markdown' });
     return;
   }
@@ -770,36 +659,30 @@ bot.on('text', async (ctx) => {
   if (todoIntent === 'add' || todoIntent === 'done') {
     try {
       await ctx.sendChatAction('typing');
-      const todos = loadTodos();
-
       const response = await openai.chat.completions.create({
         model: 'gpt-4o',
-        messages: [
-          {
-            role: 'user',
-            content: `Extract the task from this message and return ONLY a JSON object with "action" (add or done) and "task" (the task text, clean and short).
+        messages: [{
+          role: 'user',
+          content: `Extract the task from this message and return ONLY a JSON object with "action" (add or done) and "task".
 Message: "${text}"
-Example output: {"action":"add","task":"call John"}`
-          }
-        ],
+Example: {"action":"add","task":"call John"}`
+        }],
         max_tokens: 60,
       });
 
       const parsed = JSON.parse(response.choices[0].message.content.trim());
+      const todos = await getTodos();
 
       if (parsed.action === 'add') {
-        todos.push({ task: parsed.task, done: false, added: new Date().toISOString() });
-        saveTodos(todos);
-        const pending = todos.filter(t => !t.done).length;
-        ctx.reply(`✅ Got it. Added "${parsed.task}" to your list.\n📋 You now have ${pending} pending tasks.`);
+        await addTodo(parsed.task);
+        const newTodos = await getTodos();
+        ctx.reply(`✅ Added "${parsed.task}" to your list.\n📋 ${newTodos.filter(t => !t.done).length} pending tasks.`);
       } else if (parsed.action === 'done') {
-        const idx = todos.findIndex(t => !t.done && t.task.toLowerCase().includes(parsed.task.toLowerCase()));
-        if (idx !== -1) {
-          todos[idx].done = true;
-          todos[idx].completedAt = new Date().toISOString();
-          saveTodos(todos);
-          const pending = todos.filter(t => !t.done).length;
-          ctx.reply(`✅ Marked done: "${todos[idx].task}"\n📋 ${pending} tasks still pending.`);
+        const todo = todos.find(t => !t.done && t.task.toLowerCase().includes(parsed.task.toLowerCase()));
+        if (todo) {
+          await markTodoDone(todo.id);
+          const newTodos = await getTodos();
+          ctx.reply(`✅ Marked done: "${todo.task}"\n📋 ${newTodos.filter(t => !t.done).length} tasks still pending.`);
         } else {
           ctx.reply(`❌ Could not find that task. Use /todo list to see your tasks.`);
         }
@@ -811,47 +694,32 @@ Example output: {"action":"add","task":"call John"}`
   }
 
   try {
-    if (!conversations[chatId]) conversations[chatId] = [];
-    conversations[chatId].push({ role: 'user', content: text });
-
-    saveCounter++;
-    if (saveCounter % 5 === 0) {
-      saveMemories(conversations);
-      console.log('💾 Saved to disk');
-    }
-
+    await addMessage(chatId, 'user', text);
     await ctx.sendChatAction('typing');
-    const startTime = Date.now();
-    const recentMessages = conversations[chatId].slice(-8);
+
+    const recentMessages = await getConversation(chatId);
+    const last8 = recentMessages.slice(-8);
 
     let messages;
 
     if (needsSearch(text)) {
       const queries = await generateSearchQueries(text);
-      console.log('🔍 Search queries:', JSON.stringify(queries));
-
-      const searchPromises = queries.map(q => searchWeb(q.query || q));
-      const searchResultsArr = await Promise.all(searchPromises);
-
+      const searchResultsArr = await Promise.all(queries.map(q => searchWeb(q.query || q)));
       const combinedResults = queries
         .map((q, i) => searchResultsArr[i] ? `=== SEARCH: "${q.query || q}" ===\n${searchResultsArr[i]}` : null)
-        .filter(Boolean)
-        .join('\n\n');
+        .filter(Boolean).join('\n\n');
 
       if (combinedResults) {
         messages = [
           { role: 'system', content: SYSTEM_PROMPT + '\n\n' + SEARCH_PROMPT },
-          ...recentMessages.slice(0, -1),
-          {
-            role: 'user',
-            content: `My request: ${text}\n\nHere are the actual search results you must use to answer:\n\n${combinedResults}`
-          }
+          ...last8.slice(0, -1),
+          { role: 'user', content: `My request: ${text}\n\nSearch results:\n\n${combinedResults}` }
         ];
       } else {
-        messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
+        messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...last8];
       }
     } else {
-      messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
+      messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...last8];
     }
 
     const response = await openai.chat.completions.create({
@@ -861,11 +729,8 @@ Example output: {"action":"add","task":"call John"}`
     });
 
     const reply = response.choices[0].message.content;
-    conversations[chatId].push({ role: 'assistant', content: reply });
-
-    const duration = Date.now() - startTime;
+    await addMessage(chatId, 'assistant', reply);
     ctx.reply(reply);
-    console.log(`✅ ${duration}ms | 🧠 ${conversations[chatId].length} messages stored`);
 
   } catch (error) {
     console.error('Error:', error);
@@ -877,7 +742,7 @@ Example output: {"action":"add","task":"call John"}`
 
 bot.launch();
 scheduleDaily();
-console.log(`🚀 Agent Bebe running! Memory: ${MEMORY_FILE} | Todos: ${TODO_FILE} | Projects: ${PROJECTS_FILE}`);
+console.log('🚀 Agent Bebe running with Supabase persistence!');
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
