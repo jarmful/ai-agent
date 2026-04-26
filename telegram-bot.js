@@ -492,54 +492,57 @@ bot.command('build', async (ctx) => {
 
   const args = ctx.message.text.replace('/build', '').trim();
   if (!args) {
-    ctx.reply('Usage: /build <describe what you want changed in Klozet>\n\nExample: /build change the app title to Klozet 2.0');
+    ctx.reply('Usage: /build <describe what you want changed>\n\nExample: /build change navigation title to "My Wardrobe"');
     return;
   }
 
   await ctx.sendChatAction('typing');
-  ctx.reply('🔨 Reading current Klozet code...');
+  ctx.reply('🔨 Reading current code...');
 
   try {
-    // Get current ContentView.swift from GitHub
     const getRes = await fetch(
       'https://api.github.com/repos/jarmful/klozet/contents/Klozet/ContentView.swift',
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-          Accept: 'application/vnd.github+json'
-        }
-      }
+      { headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' } }
     );
     const fileData = await getRes.json();
-
-    if (!fileData.content) {
-      ctx.reply('❌ Could not read ContentView.swift from GitHub. Check the repo path.');
-      return;
-    }
+    if (!fileData.content) { ctx.reply('❌ Could not read ContentView.swift'); return; }
 
     const currentCode = Buffer.from(fileData.content, 'base64').toString('utf8');
-    ctx.reply('🧠 Generating code change...');
+    ctx.reply('🧠 Generating change...');
 
-    // Ask GPT-4o to make the change
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: 'You are a SwiftUI expert working on an iOS wardrobe app called Klozet. Return ONLY the complete updated Swift file with the requested change applied. No explanation, no markdown, no code blocks — just raw Swift code starting with import statements.'
+          content: `You are a SwiftUI expert. The user wants a small change to a Swift file.
+CRITICAL RULES:
+- Return ONLY the complete Swift file, no markdown, no code blocks, no explanation
+- Make ONLY the requested change, leave everything else exactly as-is
+- The file must be 100% valid Swift that compiles without errors
+- Do not add, remove or restructure any functions or structs
+- Do not truncate the file - return the COMPLETE file`
         },
         {
           role: 'user',
-          content: `Here is the current ContentView.swift:\n\n${currentCode}\n\nMake this change: ${args}\n\nReturn the complete updated file only.`
+          content: `Make this change to the Swift file: ${args}\n\nCurrent file:\n${currentCode}\n\nReturn the complete updated file.`
         }
       ],
       max_tokens: 4000,
     });
 
-    const newCode = response.choices[0].message.content;
-    ctx.reply('📤 Pushing to GitHub...');
+    let newCode = response.choices[0].message.content;
 
-    // Push updated file to GitHub
+    // Strip any markdown code blocks if GPT added them
+    newCode = newCode.replace(/^```swift\n?/i, '').replace(/^```\n?/, '').replace(/\n?```$/, '').trim();
+
+    // Basic validation
+    if (!newCode.includes('import SwiftUI') || !newCode.includes('struct ContentView')) {
+      ctx.reply('❌ Generated code looks invalid. Try rephrasing your request more specifically.');
+      return;
+    }
+
+    ctx.reply('📤 Pushing to GitHub...');
     const pushRes = await fetch(
       'https://api.github.com/repos/jarmful/klozet/contents/Klozet/ContentView.swift',
       {
@@ -558,14 +561,14 @@ bot.command('build', async (ctx) => {
     );
 
     if (pushRes.ok) {
-      ctx.reply(`✅ Code pushed to GitHub!\n\n🔨 Your Mac will now build automatically and upload to TestFlight.\n\n📱 Change: "${args}"\n\n⏱ Check TestFlight in ~5 minutes.`);
+      ctx.reply(`✅ Pushed to GitHub!\n\n🔨 Mac is building now...\n📱 Check TestFlight in ~5 minutes.\n\nChange: "${args}"`);
     } else {
       const err = await pushRes.json();
       ctx.reply(`❌ GitHub push failed: ${err.message}`);
     }
   } catch (error) {
     console.error('Build error:', error);
-    ctx.reply('❌ Build failed: ' + error.message);
+    ctx.reply('❌ Error: ' + error.message);
   }
 });
 
